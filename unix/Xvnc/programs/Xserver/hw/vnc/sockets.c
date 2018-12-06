@@ -21,6 +21,7 @@
 /*
  *  Copyright (C) 2012-2018 D. R. Commander.  All Rights Reserved.
  *  Copyright (C) 2011 Gernot Tenchio
+ *  Copyright (C) 2011 Joel Martin
  *  Copyright (C) 1999 AT&T Laboratories Cambridge.  All Rights Reserved.
  *
  *  This is free software; you can redistribute it and/or modify
@@ -206,7 +207,7 @@ static void rfbSockNotify(int fd, int ready, void *data)
       do {
         rfbProcessClientMessage(cl);
         CHECK_CLIENT_PTR(cl, break)
-      } while (cl->sslctx && rfbssl_pending(cl) > 0);
+      } while (cl->sock > 0 && webSocketsHasDataInBuffer(cl));
 #else
       rfbProcessClientMessage(cl);
 #endif
@@ -280,6 +281,7 @@ void rfbCloseClient(rfbClientPtr cl)
     shutdown(sock, SHUT_RDWR);
     rfbssl_destroy(cl);
   }
+  if (cl->wspath) free(cl->wspath);
 #endif
   close(sock);
   RemoveNotifyFd(sock);
@@ -331,7 +333,7 @@ int rfbConnect(char *host, int port)
  * occurred (errno is set to ETIMEDOUT if it timed out).
  */
 
-int ReadExact(rfbClientPtr cl, char *buf, int len)
+int ReadExactTimeout(rfbClientPtr cl, char *buf, int len, int timeout)
 {
   int n;
   fd_set fds;
@@ -339,14 +341,14 @@ int ReadExact(rfbClientPtr cl, char *buf, int len)
   int sock = cl->sock;
 
   while (len > 0) {
-    do {
 #if USETLS
-      if (cl->sslctx)
-        n = rfbssl_read(cl, buf, len);
-      else
+    if (cl->wsctx)
+      n = webSocketsDecode(cl, buf, len);
+    else if (cl->sslctx)
+      n = rfbssl_read(cl, buf, len);
+    else
 #endif
-      n = read(sock, buf, len);
-    } while (n < 0 && errno == EINTR);
+    n = read(sock, buf, len);
 
     if (n > 0) {
 
@@ -358,6 +360,9 @@ int ReadExact(rfbClientPtr cl, char *buf, int len)
       return 0;
 
     } else {
+      if (errno == EINTR)
+        continue;
+
       if (errno != EWOULDBLOCK && errno != EAGAIN)
         return n;
 
@@ -369,11 +374,9 @@ int ReadExact(rfbClientPtr cl, char *buf, int len)
 #endif
       FD_ZERO(&fds);
       FD_SET(sock, &fds);
-      tv.tv_sec = rfbMaxClientWait / 1000;
-      tv.tv_usec = (rfbMaxClientWait % 1000) * 1000;
-      do {
-        n = select(sock + 1, &fds, NULL, NULL, &tv);
-      } while (n < 0 && errno == EINTR);
+      tv.tv_sec = timeout / 1000;
+      tv.tv_usec = (timeout % 1000) * 1000;
+      n = select(sock + 1, &fds, NULL, &fds, &tv);
       if (n < 0) {
         rfbLogPerror("ReadExact: select");
         return n;
@@ -385,6 +388,12 @@ int ReadExact(rfbClientPtr cl, char *buf, int len)
     }
   }
   return 1;
+}
+
+
+int ReadExact(rfbClientPtr cl, char *buf, int len)
+{
+  return ReadExactTimeout(cl, buf, len, rfbMaxClientWait);
 }
 
 
@@ -413,6 +422,67 @@ int SkipExact(rfbClientPtr cl, int len)
 
 
 /*
+ * PeekExact peeks at an exact number of bytes from a client.  Returns 1 if
+ * those bytes have been read, 0 if the other end has closed, or -1 if an
+ * error occurred (errno is set to ETIMEDOUT if it timed out).
+ */
+
+int PeekExactTimeout(rfbClientPtr cl, char *buf, int len, int timeout)
+{
+  int n;
+  fd_set fds;
+  struct timeval tv;
+  int sock = cl->sock;
+
+  while (len > 0) {
+#if USETLS
+    if (cl->sslctx)
+      n = rfbssl_peek(cl, buf, len);
+    else
+#endif
+    n = recv(sock, buf, len, MSG_PEEK);
+
+    if (n == len) {
+
+      break;
+
+    } else if (n == 0) {
+
+      return 0;
+
+    } else {
+      if (errno == EINTR)
+        continue;
+
+      if (errno != EWOULDBLOCK && errno != EAGAIN)
+        return n;
+
+#if USETLS
+      if (cl->sslctx) {
+        if (rfbssl_pending(cl))
+          continue;
+      }
+#endif
+      FD_ZERO(&fds);
+      FD_SET(sock, &fds);
+      tv.tv_sec = timeout / 1000;
+      tv.tv_usec = (timeout % 1000) * 1000;
+      n = select(sock + 1, &fds, NULL, &fds, &tv);
+      if (n < 0) {
+        rfbLogPerror("PeekExact: select");
+        return n;
+      }
+      if (n == 0) {
+        errno = ETIMEDOUT;
+        return -1;
+      }
+    }
+  }
+  return 1;
+}
+
+
+/*
  * WriteExact writes an exact number of bytes on a TCP socket.  Returns 1 if
  * those bytes have been written, or -1 if an error occurred (errno is set to
  * ETIMEDOUT if it timed out).
@@ -426,15 +496,24 @@ int WriteExact(rfbClientPtr cl, char *buf, int len)
   int totalTimeWaited = 0;
   int sock = cl->sock;
 
-  while (len > 0) {
-    do {
 #if USETLS
-      if (cl->sslctx)
-        n = rfbssl_write(cl, buf, len);
-      else
+  if (cl->wsctx) {
+    char *tmp = NULL;
+    if ((len = webSocketsEncode(cl, buf, len, &tmp)) < 0) {
+      rfbLog("WriteExact: WebSockets encode error\n");
+      return -1;
+    }
+    buf = tmp;
+  }
 #endif
-      n = write(sock, buf, len);
-    } while (n < 0 && errno == EINTR);
+
+  while (len > 0) {
+#if USETLS
+    if (cl->sslctx)
+      n = rfbssl_write(cl, buf, len);
+    else
+#endif
+    n = write(sock, buf, len);
 
     if (n > 0) {
 
@@ -449,6 +528,9 @@ int WriteExact(rfbClientPtr cl, char *buf, int len)
       exit(1);
 
     } else {
+      if (errno == EINTR)
+        continue;
+
       if (errno != EWOULDBLOCK && errno != EAGAIN && errno != 0)
         return n;
 
@@ -460,10 +542,10 @@ int WriteExact(rfbClientPtr cl, char *buf, int len)
       FD_SET(sock, &fds);
       tv.tv_sec = 5;
       tv.tv_usec = 0;
-      do {
-        n = select(sock + 1, NULL, &fds, NULL, &tv);
-      } while (n < 0 && errno == EINTR);
+      n = select(sock + 1, NULL, &fds, NULL, &tv);
       if (n < 0) {
+        if (errno == EINTR)
+          continue;
         rfbLogPerror("WriteExact: select");
         return n;
       }

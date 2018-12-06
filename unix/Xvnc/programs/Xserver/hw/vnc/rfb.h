@@ -4,6 +4,8 @@
 
 /*
  *  Copyright (C) 2010-2018 D. R. Commander.  All Rights Reserved.
+ *  Copyright (C) 2011 Gernot Tenchio
+ *  Copyright (C) 2011 Joel Martin
  *  Copyright (C) 2010 University Corporation for Atmospheric Research.
  *                     All Rights Reserved.
  *  Copyright (C) 2000-2004 Const Kaplinsky.  All Rights Reserved.
@@ -220,6 +222,7 @@ typedef struct {
 
 #if USETLS
 typedef struct _rfbSslCtx rfbSslCtx;
+typedef struct _wsCtx wsCtx;
 #endif
 
 typedef struct rfbClientRec {
@@ -432,6 +435,8 @@ typedef struct rfbClientRec {
 
 #if USETLS
   rfbSslCtx *sslctx;
+  wsCtx     *wsctx;
+  char      *wspath;                /* Requests path component */
 #endif
 
   /* Extended input device support */
@@ -893,7 +898,9 @@ extern int rfbConnect(char *host, int port);
 extern void rfbCorkSock(int sock);
 extern void rfbUncorkSock(int sock);
 
+extern int PeekExactTimeout(rfbClientPtr cl, char *buf, int len, int timeout);
 extern int ReadExact(rfbClientPtr cl, char *buf, int len);
+extern int ReadExactTimeout(rfbClientPtr cl, char *buf, int len, int timeout);
 extern int SkipExact(rfbClientPtr cl, int len);
 extern int WriteExact(rfbClientPtr cl, char *buf, int len);
 extern int ListenOnTCPPort(int port);
@@ -943,6 +950,19 @@ extern Bool rfbSetTranslateFunction(rfbClientPtr cl);
 extern void rfbSetClientColourMaps(int firstColour, int nColours);
 extern Bool rfbSetClientColourMap(rfbClientPtr cl, int firstColour,
                                   int nColours);
+
+
+#if USETLS
+
+/* websockets.c */
+
+extern Bool webSocketsCheck(rfbClientPtr cl);
+extern int webSocketsEncode(rfbClientPtr cl, const char *src, int len,
+                            char **dst);
+extern int webSocketsDecode(rfbClientPtr cl, char *dst, int len);
+extern Bool webSocketsHasDataInBuffer(rfbClientPtr cl);
+
+#endif
 
 
 /* zlib.c */

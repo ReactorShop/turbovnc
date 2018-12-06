@@ -92,6 +92,13 @@ will no longer automatically be created if it doesn't exist.
 `$numThreads` turbovncserver.conf variables are now deprecated, since
 `$serverArgs` can be used to accomplish the same thing.
 
+15. The TurboVNC Server now supports the WebSocket protocol (more specifically,
+RFC 6455, AKA HyBi v13.)  The server will automatically detect WebSocket
+connections on the RFB port (5900 + {display number}) and tunnel the RFB
+protocol through the WebSocket protocol.  This allows browser-based VNC
+viewers, such as noVNC, to connect to the TurboVNC Server without using a
+proxy.
+
 
 2.2.1
 =====
